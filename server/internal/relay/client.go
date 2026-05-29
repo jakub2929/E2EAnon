@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/jakub2929/E2EAnon/internal/wsproto"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/jakub2929/E2EAnon/internal/wsproto"
 )
 
 // outboundBuffer is the number of queued server messages per client before

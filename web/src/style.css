@@ -154,9 +154,14 @@ button.link {
 
 .room-head {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 1rem;
+}
+.room-head code {
+  word-break: break-all;
 }
 .room-head .muted {
   color: var(--muted);
@@ -193,13 +198,16 @@ button.link {
 }
 .invite-row input {
   flex: 1;
+  min-width: 0; /* allow the input to shrink instead of overflowing the row */
   font-family: ui-monospace, monospace;
   font-size: 0.8rem;
 }
 
 .room-body {
   display: grid;
-  grid-template-columns: 1fr 200px;
+  /* minmax(0,…) lets the tracks shrink below their content's intrinsic width
+     (a 1fr track's implicit min-width:auto otherwise forces overflow). */
+  grid-template-columns: minmax(0, 1fr) 200px;
   gap: 1rem;
 }
 
@@ -256,6 +264,7 @@ button.link {
 }
 .member-name {
   flex: 1;
+  min-width: 0; /* required so a long nick truncates (ellipsis) instead of overflowing */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -296,6 +305,7 @@ button.link {
 }
 .msg input {
   flex: 1;
+  min-width: 0;
 }
 
 .modal {
@@ -349,6 +359,9 @@ button.link {
 
 @media (max-width: 640px) {
   .room-body {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #messages {
+    height: 300px;
   }
 }

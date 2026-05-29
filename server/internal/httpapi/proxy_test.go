@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/jakub2929/E2EAnon/internal/config"
 	"github.com/jakub2929/E2EAnon/internal/httpapi"
 	"github.com/jakub2929/E2EAnon/internal/relay"
 	"github.com/jakub2929/E2EAnon/internal/wsproto"
-	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 )
 
 // TestWebSocketBehindReverseProxy simulates Coolify's Traefik by putting an

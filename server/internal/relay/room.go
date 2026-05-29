@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jakub2929/E2EAnon/internal/wsproto"
 	"github.com/coder/websocket"
+	"github.com/jakub2929/E2EAnon/internal/wsproto"
 )
 
 // Errors returned when adding a member fails.

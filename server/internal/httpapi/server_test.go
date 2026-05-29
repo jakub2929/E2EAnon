@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/jakub2929/E2EAnon/internal/config"
 	"github.com/jakub2929/E2EAnon/internal/httpapi"
 	"github.com/jakub2929/E2EAnon/internal/relay"
 	"github.com/jakub2929/E2EAnon/internal/wsproto"
-	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 )
 
 func testConfig() config.Config {
@@ -29,12 +29,43 @@ func testConfig() config.Config {
 }
 
 func newServer(t *testing.T, cfg config.Config) string {
+	url, _ := newServerH(t, cfg)
+	return url
+}
+
+// newServerH is like newServer but also returns the hub for RAM-state assertions.
+func newServerH(t *testing.T, cfg config.Config) (string, *relay.Hub) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := relay.NewHub(cfg, log)
 	ts := httptest.NewServer(httpapi.NewServer(cfg, hub, log, nil))
 	t.Cleanup(ts.Close)
-	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws", hub
+}
+
+// TestRAMFreedOnDisconnect is the hard proof that closing a connection wipes the
+// room AND the session claim from server RAM — no leak in the sessions/rooms maps.
+func TestRAMFreedOnDisconnect(t *testing.T) {
+	url, hub := newServerH(t, testConfig())
+	c := dial(t, url)
+	send(t, c, wsproto.ClientMsg{Type: wsproto.TypeCreate, Nick: "alice", Session: "sess-ram"})
+	recvType(t, c, wsproto.TypeWelcome)
+
+	if hub.SessionCount() != 1 || hub.RoomCount() != 1 {
+		t.Fatalf("expected 1 session/1 room while connected, got sessions=%d rooms=%d",
+			hub.SessionCount(), hub.RoomCount())
+	}
+
+	_ = c.Close(websocket.StatusNormalClosure, "bye")
+
+	// Teardown is async; poll until both maps are empty.
+	for i := 0; i < 40; i++ {
+		if hub.SessionCount() == 0 && hub.RoomCount() == 0 {
+			return // RAM fully reclaimed
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("RAM leak after disconnect: sessions=%d rooms=%d", hub.SessionCount(), hub.RoomCount())
 }
 
 func dial(t *testing.T, url string) *websocket.Conn {
