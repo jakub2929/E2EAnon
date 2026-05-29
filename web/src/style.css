@@ -107,6 +107,17 @@ button.link {
   width: 100%;
 }
 
+.stats {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.9rem 0 0;
+}
+.stats::before {
+  content: "● ";
+  color: #5fcf8e;
+}
+
 .divider {
   text-align: center;
   color: var(--muted);

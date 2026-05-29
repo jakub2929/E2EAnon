@@ -120,6 +120,7 @@ const lobby = $("lobby");
 const room = $("room");
 const lobbyError = $("lobby-error");
 const lobbyStatus = $("lobby-status");
+const lobbyStats = $("lobby-stats");
 const roomNotice = $("room-notice");
 const nickInput = $<HTMLInputElement>("nick");
 const roomInput = $<HTMLInputElement>("room-input");
@@ -929,6 +930,24 @@ function showLobby(): void {
   room.classList.add("hidden");
   lobby.classList.remove("hidden");
   roomInput.value = "";
+  void pollStats(); // refresh the live counts on return to the lobby
+}
+
+// ── Live lobby stats (aggregate only; polled) ───────────────────────────────
+
+async function pollStats(): Promise<void> {
+  if (lobby.classList.contains("hidden")) return; // only meaningful in the lobby
+  try {
+    const r = await fetch("/api/stats", { cache: "no-store" });
+    if (!r.ok) throw new Error("bad status");
+    const s = (await r.json()) as { online: number; rooms: number };
+    const people = `${s.online} ${s.online === 1 ? "person" : "people"} online`;
+    const rooms = `${s.rooms} active ${s.rooms === 1 ? "room" : "rooms"}`;
+    lobbyStats.textContent = `${people} · ${rooms}`;
+    lobbyStats.classList.remove("hidden");
+  } catch {
+    lobbyStats.classList.add("hidden"); // degrade gracefully — never block the lobby
+  }
 }
 
 // ── Invite link + code ──────────────────────────────────────────────────────
@@ -1068,6 +1087,10 @@ function doLeave(): void {
 }
 
 window.addEventListener("beforeunload", () => send({ type: "leave" }));
+
+// Live lobby stats: poll now and every 12s (cheap; only updates while in lobby).
+void pollStats();
+setInterval(() => void pollStats(), 12_000);
 
 // iOS Safari suspends backgrounded tabs (timers + sockets). On return, if our
 // socket died, recover cleanly to the lobby instead of appearing frozen.
