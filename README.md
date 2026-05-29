@@ -23,6 +23,9 @@ never read message content or derive any encryption key.
   fresh **single-use 10-character codes**.
 - **Forward secrecy on membership changes:** the room key is rotated on every
   join and every leave.
+- **Encrypted photo & file sharing** over the same E2E path (chunked
+  XChaCha20-Poly1305; filename/MIME encrypted in the payload; server relays
+  opaque blobs, never touches disk).
 - On leave / room close, all message history is wiped from memory everywhere.
 - **One room per session** (soft, UX-level): a tab is in at most one room at a
   time, tracked by an ephemeral in-memory session id. Switching prompts you to
@@ -131,9 +134,10 @@ the relay never sees the room key or the invite code and cannot derive them.
 It does **not** protect against: a **malicious room member** (who legitimately
 holds the key and can screenshot/leak — and can spoof another member's nick), a
 **compromised endpoint**, **traffic analysis / metadata** (the server sees room
-IDs, presence, timing, message sizes, and IPs), **denial of service**, or — most
-importantly — a **server that serves backdoored client code** (inherent to any
-browser-delivered E2E app). The SPAKE2 layer is a **custom implementation** on
+IDs, presence, timing, message sizes, and IPs — and for files, the approximate
+**file size, chunk count, timing, and who shared with whom**, though never the
+bytes/filename/MIME), **denial of service**, or — most importantly — a **server
+that serves backdoored client code** (inherent to any browser-delivered E2E app). The SPAKE2 layer is a **custom implementation** on
 audited primitives (RFC 9382, validated against the official test vectors), **not
 an audited library**. The **one-room-per-session** rule is a UX convenience, not
 a security boundary (trivially bypassed by another tab/browser/device).

@@ -96,6 +96,28 @@ and client IP addresses** (X-Forwarded-For behind the proxy). AnonChat does
 **not** pad messages, cover-traffic, or anonymize IPs. For network anonymity,
 put the service and clients behind Tor or a VPN — that is out of scope here.
 
+#### File-sharing metadata (be aware of this)
+Files/images are end-to-end encrypted exactly like messages — the server never
+sees the **bytes, filename, MIME type, or image headers** (verified: a PNG's
+`89 50 4e 47` signature does not appear on the wire; the filename and MIME are
+encrypted inside the `file_start` payload; the relay never decodes the data and
+holds only an opaque blob + a byte counter). **However, the server still sees,
+for every transfer, the following metadata and you should assume it can use it:**
+
+- **Approximate file size** — the total ciphertext bytes are ~the file size
+  (+ ~33% base64 + small per-chunk overhead). Size alone can hint at the kind of
+  content (e.g. a 4 MB blob is probably a photo, a 12-byte one is not).
+- **Chunk count and indices** — also a size proxy (≈ size ÷ 64 KiB).
+- **Timing** — when a transfer starts/ends and how long it takes.
+- **Who → whom** — the sender's member id and that it was broadcast to the room's
+  members; the server learns *that* a participant shared a file with the room.
+- The **existence and frequency** of transfers.
+
+AnonChat does **not** pad file sizes or obscure these. This is the same class of
+leak as for text messages, just more pronounced (larger, multi-frame). If size/
+timing correlation is part of your threat model, this is a real exposure — treat
+it accordingly (and see network anonymity above).
+
 ### E. The custom SPAKE2 implementation
 There is no maintained, audited browser SPAKE2 library. AnonChat's SPAKE2
 ([`web/src/spake2.ts`](../web/src/spake2.ts)) is a **custom implementation** on
