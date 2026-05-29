@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -57,9 +58,22 @@ func NewServer(cfg config.Config, hub *relay.Hub, log *slog.Logger, staticFS fs.
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("/ws", s.handleWS)
 	s.mountStatic(mux, staticFS)
 	return mux
+}
+
+// handleStats returns the two live aggregate counts (online connections, active
+// rooms) computed on demand from in-memory state. No history, no per-room or
+// per-user data — just the two global integers.
+func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]int{
+		"online": s.hub.OnlineCount(),
+		"rooms":  s.hub.RoomCount(),
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -83,6 +97,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.log.Debug("ws accept failed", "err", err)
 		return
 	}
+	// Count this live connection for the aggregate lobby stats; release on exit.
+	s.hub.AddOnline(1)
+	defer s.hub.AddOnline(-1)
 	conn.SetReadLimit(readLimit)
 	ip := clientIP(r, s.cfg.TrustProxy)
 

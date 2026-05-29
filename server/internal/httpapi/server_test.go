@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -692,6 +693,87 @@ func TestFileInflightReleasedOnDisconnect(t *testing.T) {
 	// Sender vanishes mid-transfer (no file_end) — its in-flight bytes must free.
 	_ = bob.Close(websocket.StatusNormalClosure, "bye")
 	waitInflightZero(t, hub)
+}
+
+// ── live lobby stats ────────────────────────────────────────────────────────
+
+func httpBaseOf(wsURL string) string {
+	return "http" + strings.TrimPrefix(strings.TrimSuffix(wsURL, "/ws"), "ws")
+}
+
+// stats fetches /api/stats and returns (online, rooms).
+func stats(t *testing.T, base string) (int, int) {
+	t.Helper()
+	resp, err := http.Get(base + "/api/stats")
+	if err != nil {
+		t.Fatalf("GET /api/stats: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/stats status %d", resp.StatusCode)
+	}
+	var s struct {
+		Online int `json:"online"`
+		Rooms  int `json:"rooms"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	return s.Online, s.Rooms
+}
+
+// waitStats polls until the counts match (teardown/accept are async).
+func waitStats(t *testing.T, base string, wantOnline, wantRooms int) {
+	t.Helper()
+	for i := 0; i < 40; i++ {
+		if o, r := stats(t, base); o == wantOnline && r == wantRooms {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	o, r := stats(t, base)
+	t.Fatalf("stats never reached online=%d rooms=%d (last online=%d rooms=%d)", wantOnline, wantRooms, o, r)
+}
+
+func TestStatsLiveCounts(t *testing.T) {
+	url := newServer(t, testConfig())
+	base := httpBaseOf(url)
+
+	if o, r := stats(t, base); o != 0 || r != 0 {
+		t.Fatalf("expected empty server, got online=%d rooms=%d", o, r)
+	}
+
+	owner, _ := createRoom(t, url, "alice")
+	waitStats(t, base, 1, 1) // one connection, one room
+
+	joiner, _ := joinViaInvite(t, url, owner, "bob")
+	waitStats(t, base, 2, 1) // two connections, still one room
+
+	// A joiner leaving drops the connection count; room persists.
+	_ = joiner.Close(websocket.StatusNormalClosure, "bye")
+	waitStats(t, base, 1, 1)
+
+	// Owner leaving drops the connection AND destroys the room.
+	_ = owner.Close(websocket.StatusNormalClosure, "bye")
+	waitStats(t, base, 0, 0)
+}
+
+func TestStatsRaceSafe(t *testing.T) {
+	url := newServer(t, testConfig())
+	base := httpBaseOf(url)
+	// Hammer the endpoint while connections churn (run under -race).
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			stats(t, base)
+		}
+		close(done)
+	}()
+	for i := 0; i < 10; i++ {
+		owner, _ := createRoom(t, url, "x")
+		_ = owner.Close(websocket.StatusNormalClosure, "")
+	}
+	<-done
 }
 
 func TestBadHelloRejected(t *testing.T) {

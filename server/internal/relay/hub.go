@@ -31,7 +31,17 @@ type Hub struct {
 	// relay is carrying (cap guard). RAM only; relayed chunk-by-chunk, never
 	// buffered to disk.
 	inflight atomic.Int64
+
+	// online is the count of live WebSocket connections (for the lobby stats).
+	// A pure aggregate integer — no per-connection identity is tracked.
+	online atomic.Int64
 }
+
+// AddOnline adjusts the live-connection counter (called on WS accept / teardown).
+func (h *Hub) AddOnline(delta int64) { h.online.Add(delta) }
+
+// OnlineCount returns the number of live WebSocket connections (aggregate).
+func (h *Hub) OnlineCount() int { return int(h.online.Load()) }
 
 // AddInflight adjusts the global in-flight file-byte counter and returns the new
 // total. Used to bound concurrent transfer volume (reject, never disk-buffer).
