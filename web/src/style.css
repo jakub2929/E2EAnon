@@ -303,9 +303,78 @@ button.link {
   gap: 0.5rem;
   margin-top: 1rem;
 }
-.msg input {
+.msg input[type="text"] {
   flex: 1;
   min-width: 0;
+}
+
+/* Attach button: a <label> wrapping a visually-hidden (NOT display:none — that
+   can break the tap-to-open on iOS) file input. */
+.attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #11141a;
+  font-size: 1.2rem;
+  cursor: pointer;
+  user-select: none;
+}
+.attach:hover {
+  border-color: var(--accent);
+}
+.attach input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  pointer-events: none;
+}
+
+.attach-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #11141a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  margin-top: 0.75rem;
+}
+.attach-preview img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.attach-preview .meta {
+  flex: 1;
+  min-width: 0;
+}
+.attach-preview .meta .name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+.attach-preview .meta .size {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.attach-preview .remove {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.15rem 0.45rem;
 }
 
 .modal {

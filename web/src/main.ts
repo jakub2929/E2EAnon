@@ -30,6 +30,9 @@ import { HandshakeSession } from "./handshake";
 
 const MAX_KEPT_KEYS = 5;
 
+// Client-side per-file cap (Phase 1). The server enforces its own cap in Phase 2.
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
+
 // Ephemeral per-tab session id (v2): random, in-memory only, regenerated on
 // every page load. Sent on create/redeem so the server can enforce one room per
 // session. NOT persisted anywhere; not an identity.
@@ -68,6 +71,10 @@ let pendingJoin: { token: string; code: string } | null = null;
 // so onClose can distinguish a clean exit from an unexpected drop.
 let intentionalClose = false;
 
+// Locally staged attachment (Phase 1: previewed only, not sent yet). The object
+// URL is revoked on remove / send / teardown so no blob bytes linger.
+let staged: { file: File; url: string } | null = null;
+
 // ── DOM helpers ─────────────────────────────────────────────────────────────
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -89,6 +96,8 @@ const msgInput = $<HTMLInputElement>("msg-input");
 const inviteBtn = $<HTMLButtonElement>("invite-btn");
 const inviteBox = $("invite-box");
 const inviteLink = $<HTMLInputElement>("invite-link");
+const fileInput = $<HTMLInputElement>("file-input");
+const attachPreview = $("attach-preview");
 const modal = $("modal");
 const modalTitle = $("modal-title");
 const modalBody = $("modal-body");
@@ -531,7 +540,70 @@ function teardown(returnToLobby = true): void {
   inviteBox.classList.add("hidden");
   inviteLink.value = "";
   inviteBtn.classList.add("hidden");
+  clearStaged(); // revoke any object URL so blob bytes don't linger between rooms
   if (returnToLobby) showLobby();
+}
+
+// ── Attachment staging (Phase 1: local only) ────────────────────────────────
+
+function onFileSelected(): void {
+  const f = fileInput.files?.[0];
+  fileInput.value = ""; // allow re-selecting the same file later
+  if (!f) return;
+  if (f.size > MAX_FILE_BYTES) {
+    roomNotice.textContent = `"${f.name}" is too large (max ${formatBytes(MAX_FILE_BYTES)}).`;
+    return;
+  }
+  clearStaged();
+  staged = { file: f, url: URL.createObjectURL(f) };
+  renderStaged();
+}
+
+function renderStaged(): void {
+  if (!staged) return;
+  attachPreview.replaceChildren();
+
+  if (staged.file.type.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.src = staged.url; // local object URL; decrypted-on-recipient comes later
+    img.alt = "attachment preview";
+    attachPreview.appendChild(img);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = staged.file.name; // textContent — no injection
+  const size = document.createElement("span");
+  size.className = "size";
+  size.textContent = formatBytes(staged.file.size) + " · staged (not sent yet)";
+  meta.append(name, size);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "remove";
+  remove.textContent = "✕";
+  remove.setAttribute("aria-label", "Remove attachment");
+  remove.addEventListener("click", clearStaged);
+
+  attachPreview.append(meta, remove);
+  attachPreview.classList.remove("hidden");
+}
+
+function clearStaged(): void {
+  if (staged) {
+    URL.revokeObjectURL(staged.url);
+    staged = null;
+  }
+  attachPreview.replaceChildren();
+  attachPreview.classList.add("hidden");
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -661,6 +733,9 @@ $<HTMLFormElement>("join-form").addEventListener("submit", async (e) => {
 });
 
 inviteBtn.addEventListener("click", () => send({ type: "invite" }));
+
+// Attachment selection (the <label> wrapping #file-input opens the picker).
+fileInput.addEventListener("change", onFileSelected);
 
 memberList.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button.member-action");

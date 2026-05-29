@@ -69,7 +69,17 @@
           </aside>
         </div>
 
+        <!-- Staged attachment preview (Phase 1: local only, not sent yet) -->
+        <div id="attach-preview" class="attach-preview hidden"></div>
+
         <form id="msg-form" class="msg">
+          <!-- iOS-reliable pattern: a <label> WRAPPING the file input. Tapping
+               the label opens the native picker (Photo Library / Take Photo /
+               Choose File) on iOS Safari. accept="image/*" enables camera. -->
+          <label id="attach-btn" class="attach" aria-label="Attach a photo">
+            <input id="file-input" type="file" accept="image/*" />
+            <span aria-hidden="true">📎</span>
+          </label>
           <input id="msg-input" type="text" placeholder="Type a message…" autocomplete="off" />
           <button type="submit">Send</button>
         </form>
