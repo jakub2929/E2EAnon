@@ -20,8 +20,11 @@ import {
   encryptMessage,
   generateKeyPair,
   generateRoomKey,
+  keyId,
+  openBytes,
   openRoomKey,
   openUnderKe,
+  sealBytes,
   sealRoomKey,
   sealUnderKe,
   wipeKey,
@@ -29,6 +32,24 @@ import {
 import { HandshakeSession } from "./handshake";
 
 const MAX_KEPT_KEYS = 5;
+// Plaintext bytes per encrypted file chunk (each chunk is independently sealed).
+const CHUNK_SIZE = 64 * 1024;
+
+interface FileMeta {
+  name: string;
+  type: string;
+  size: number;
+  chunks: number;
+}
+
+// In-progress inbound file transfer (reassembled in RAM, then rendered).
+interface Incoming {
+  key: RoomKey;
+  meta: FileMeta;
+  nick: string;
+  parts: (Uint8Array | undefined)[];
+  received: number;
+}
 
 // Client-side per-file cap (Phase 1). The server enforces its own cap in Phase 2.
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -64,6 +85,8 @@ interface Session {
   knownMembers: Set<string>; // owner: current ids (leave detection)
   firstOwnerPub: Uint8Array | null; // joiner: owner pub from the handshake
   lastMembers: MemberInfo[]; // latest presence (for the owner-leave dialog)
+  incoming: Map<string, Incoming>; // in-progress inbound file transfers
+  objectUrls: string[]; // blob URLs for rendered files; revoked on teardown
 }
 let session: Session | null = null;
 let pendingJoin: { token: string; code: string } | null = null;
@@ -185,6 +208,8 @@ async function connect(hello: ClientMsg): Promise<void> {
     knownMembers: new Set(),
     firstOwnerPub: null,
     lastMembers: [],
+    incoming: new Map(),
+    objectUrls: [],
   };
 }
 
@@ -234,6 +259,18 @@ function onMessage(data: unknown): void {
       break;
     case "roster":
       applyRoster(msg.data ?? "");
+      break;
+    case "file_start":
+      onFileStart(msg);
+      break;
+    case "file_chunk":
+      onFileChunk(msg);
+      break;
+    case "file_end":
+      onFileEnd(msg);
+      break;
+    case "file_abort":
+      if (msg.transfer) session?.incoming.delete(msg.transfer);
       break;
     case "room_closed":
       intentionalClose = true; // server ended the room; lobby return is expected
@@ -487,6 +524,11 @@ function ownerIdOf(members: MemberInfo[]): string {
 // ── Errors / close / teardown ───────────────────────────────────────────────
 
 function handleError(msg: ServerMsg): void {
+  if (msg.reason === "file_rejected") {
+    if (msg.transfer) session?.incoming.delete(msg.transfer);
+    roomNotice.textContent = `Attachment rejected: ${msg.error ?? "too large"}.`;
+    return;
+  }
   if (msg.reason === "already_in_room") {
     // Backstop: this tab's session is already in a room (the local flow should
     // normally prevent reaching here). Drop the dead attempt and explain.
@@ -527,6 +569,8 @@ function teardown(returnToLobby = true): void {
     wipeKey(s.kp.priv);
     if (s.firstOwnerPub) s.firstOwnerPub.fill(0);
     for (const rec of s.handshakes.values()) wipeKey(rec.ke ?? null);
+    for (const u of s.objectUrls) URL.revokeObjectURL(u); // no blob bytes linger
+    s.incoming.clear();
     try {
       s.ws.close();
     } catch {
@@ -604,6 +648,133 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Encrypted file transfer (Phase 2) ───────────────────────────────────────
+
+function randomId(): string {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function trackUrl(url: string): string {
+  session?.objectUrls.push(url);
+  return url;
+}
+
+// findKeyById returns the held room key whose epoch tag matches id (the file
+// can thus be decrypted even after the key rotated, while we still hold it).
+function findKeyById(id: string): RoomKey | null {
+  if (!session) return null;
+  for (const k of session.keys) if (keyId(k) === id) return k;
+  return null;
+}
+
+// sendFile encrypts a file (metadata + chunks) under the CURRENT room key,
+// captured once so the whole transfer uses one epoch, and streams it chunked.
+async function sendFile(file: File): Promise<void> {
+  if (!session || !session.keys.length) return;
+  const key = session.keys[0]; // capture epoch at send time
+  const kid = keyId(key);
+  const transfer = randomId();
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const total = Math.max(1, Math.ceil(buf.length / CHUNK_SIZE));
+  const meta: FileMeta = { name: file.name, type: file.type, size: buf.length, chunks: total };
+
+  // Metadata (name/MIME/size) is ENCRYPTED in the payload — the server never
+  // sees the filename or type.
+  send({ type: "file_start", transfer, keyId: kid, data: encryptMessage(key, JSON.stringify(meta)) });
+  for (let i = 0; i < total; i++) {
+    const slice = buf.subarray(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    send({ type: "file_chunk", transfer, index: i, data: sealBytes(key, slice) });
+    await Promise.resolve(); // yield to the event loop (progress UI lands in Phase 3)
+  }
+  send({ type: "file_end", transfer });
+
+  // Render our own copy locally.
+  const url = trackUrl(URL.createObjectURL(new Blob([buf], { type: file.type })));
+  addFileMessage("you", url, meta, true);
+}
+
+function onFileStart(msg: ServerMsg): void {
+  if (!session || !msg.transfer || !msg.keyId || msg.data === undefined) return;
+  const key = findKeyById(msg.keyId);
+  if (!key) return; // we don't hold that key epoch — cannot decrypt; ignore
+  let meta: FileMeta;
+  try {
+    meta = JSON.parse(decryptMessage(key, msg.data)) as FileMeta;
+  } catch {
+    return;
+  }
+  if (!meta.chunks || meta.chunks < 1 || meta.chunks > 100000) return;
+  session.incoming.set(msg.transfer, {
+    key,
+    meta,
+    nick: msg.nick ?? "?",
+    parts: new Array(meta.chunks),
+    received: 0,
+  });
+}
+
+function onFileChunk(msg: ServerMsg): void {
+  const inc = session?.incoming.get(msg.transfer ?? "");
+  if (!inc || msg.data === undefined) return;
+  const i = msg.index ?? -1;
+  if (i < 0 || i >= inc.meta.chunks || inc.parts[i]) return;
+  let chunk: Uint8Array;
+  try {
+    chunk = openBytes(inc.key, msg.data);
+  } catch {
+    return; // tampered / wrong key — drop
+  }
+  inc.parts[i] = chunk;
+  inc.received++;
+  if (inc.received === inc.meta.chunks) finishIncoming(msg.transfer!);
+}
+
+function onFileEnd(msg: ServerMsg): void {
+  // Completion is detected when all chunks arrive; if file_end arrives with a
+  // gap, the transfer is incomplete (lost chunk) — discard it.
+  if (msg.transfer && session?.incoming.has(msg.transfer)) {
+    session.incoming.delete(msg.transfer);
+  }
+}
+
+function finishIncoming(transfer: string): void {
+  const inc = session?.incoming.get(transfer);
+  if (!inc || !session) return;
+  session.incoming.delete(transfer);
+  const blob = new Blob(inc.parts as unknown as BlobPart[], { type: inc.meta.type });
+  const url = trackUrl(URL.createObjectURL(blob));
+  addFileMessage(inc.nick, url, inc.meta, false);
+}
+
+function addFileMessage(nick: string, url: string, meta: FileMeta, mine: boolean): void {
+  const li = document.createElement("li");
+  li.className = mine ? "msg-mine" : "msg-other";
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = nick;
+  li.appendChild(who);
+
+  if ((meta.type || "").startsWith("image/")) {
+    const img = document.createElement("img");
+    img.className = "msg-image";
+    img.src = url;
+    img.alt = meta.name;
+    img.addEventListener("click", () => window.open(url, "_blank", "noopener"));
+    li.appendChild(img);
+  } else {
+    const a = document.createElement("a");
+    a.className = "msg-file";
+    a.href = url;
+    a.download = meta.name;
+    a.textContent = `📎 ${meta.name} (${formatBytes(meta.size)})`;
+    li.appendChild(a);
+  }
+  messageList.appendChild(li);
+  messageList.scrollTop = messageList.scrollHeight;
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -759,13 +930,20 @@ $("copy-invite-btn").addEventListener("click", async () => {
   }
 });
 
-$<HTMLFormElement>("msg-form").addEventListener("submit", (e) => {
+$<HTMLFormElement>("msg-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (!session?.keys.length) return;
   const body = msgInput.value;
-  if (!body.trim() || !session?.keys.length) return;
-  send({ type: "msg", body: encryptMessage(session.keys[0], body) });
-  addMessage("you", body, true);
-  msgInput.value = "";
+  if (body.trim()) {
+    send({ type: "msg", body: encryptMessage(session.keys[0], body) });
+    addMessage("you", body, true);
+    msgInput.value = "";
+  }
+  if (staged) {
+    const file = staged.file;
+    clearStaged(); // sendFile makes its own object URL for the message
+    await sendFile(file);
+  }
 });
 
 $("leave-btn").addEventListener("click", onLeaveClicked);

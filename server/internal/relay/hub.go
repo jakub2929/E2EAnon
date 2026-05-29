@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jakub2929/E2EAnon/internal/config"
@@ -25,7 +26,23 @@ type Hub struct {
 	// sessions enforces one room per ephemeral session id (v2). RAM only,
 	// cleared on disconnect/teardown. Maps session id -> owning claim.
 	sessions map[string]*sessionClaim
+
+	// inflight is the total ciphertext bytes of in-progress file transfers the
+	// relay is carrying (cap guard). RAM only; relayed chunk-by-chunk, never
+	// buffered to disk.
+	inflight atomic.Int64
 }
+
+// AddInflight adjusts the global in-flight file-byte counter and returns the new
+// total. Used to bound concurrent transfer volume (reject, never disk-buffer).
+func (h *Hub) AddInflight(delta int64) int64 { return h.inflight.Add(delta) }
+
+// InflightBytes returns the current in-flight file-byte total (tests/metrics).
+func (h *Hub) InflightBytes() int64 { return h.inflight.Load() }
+
+// MaxFileBytes / MaxInflightBytes expose the configured caps.
+func (h *Hub) MaxFileBytes() int64     { return h.cfg.MaxFileBytes }
+func (h *Hub) MaxInflightBytes() int64 { return h.cfg.MaxInflightBytes }
 
 // sessionClaim records which connection currently holds a session id and the
 // room it is in (roomID is informational; presence of the entry is what blocks

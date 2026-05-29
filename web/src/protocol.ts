@@ -26,7 +26,11 @@ export type ClientMsg =
   | { type: "rekey"; target: string; data: string }
   | { type: "transfer"; target: string }
   | { type: "kick"; target: string }
-  | { type: "roster"; data: string };
+  | { type: "roster"; data: string }
+  | { type: "file_start"; transfer: string; keyId: string; data: string }
+  | { type: "file_chunk"; transfer: string; index: number; data: string }
+  | { type: "file_end"; transfer: string }
+  | { type: "file_abort"; transfer: string };
 
 // Server -> Client
 export interface ServerMsg {
@@ -43,7 +47,11 @@ export interface ServerMsg {
     | "key_deliver"
     | "member_key"
     | "rekey"
-    | "roster";
+    | "roster"
+    | "file_start"
+    | "file_chunk"
+    | "file_end"
+    | "file_abort";
   room?: string;
   memberId?: string;
   role?: Role;
@@ -57,6 +65,9 @@ export interface ServerMsg {
   token?: string;
   handshake?: string;
   data?: string;
+  transfer?: string;
+  keyId?: string;
+  index?: number;
 }
 
 // Build the WebSocket URL for the relay on the current origin.

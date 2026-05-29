@@ -77,6 +77,10 @@ handshake; a wrong code fails key confirmation and the joiner never enters.
 | `roster`      | `data`                  | (Owner) member→pubkey map, encrypted under room key. |
 | `transfer`    | `target`                | (Owner) hand ownership to another member.            |
 | `kick`        | `target`                | (Owner) remove a member from the room.               |
+| `file_start`  | `transfer`, `keyId`, `data` | Begin a file transfer; `data` = encrypted metadata. |
+| `file_chunk`  | `transfer`, `index`, `data` | One sealed file chunk.                          |
+| `file_end`    | `transfer`              | Transfer complete.                                   |
+| `file_abort`  | `transfer`              | Abandon a transfer (peers discard the partial).      |
 | `msg`         | `body`                  | Send a chat message. `body` is a ciphertext envelope.|
 | `leave`       | —                       | Gracefully leave the room.                           |
 
@@ -102,6 +106,7 @@ handshake; a wrong code fails key confirmation and the joiner never enters.
 | `key_deliver`     | `handshake`, `data`                   | Relayed room key sealed to the joiner.   |
 | `rekey`           | `data`                                | Rotated room key sealed to this member.  |
 | `roster`          | `data`                                | Member→pubkey map (under the room key).  |
+| `file_start`/`file_chunk`/`file_end`/`file_abort` | `transfer`, `keyId`/`index`, `data`, `from`, `nick` | Relayed file-transfer frames. |
 | `room_closed`     | `reason`                              | Room/this membership ended; wipe state.  |
 | `error`           | `error`, `reason`                     | Recoverable/fatal error.                 |
 
@@ -125,6 +130,7 @@ handshake; a wrong code fails key confirmation and the joiner never enters.
 | `not_owner`       | `error`       | Only the owner may invite/transfer/kick. |
 | `kicked`          | `room_closed` | You were removed by the owner.       |
 | `already_in_room` | `error`       | This session is already in a room (one-room rule). |
+| `file_rejected`   | `error`       | File transfer over the per-file / in-flight cap. |
 | `bad_request`     | `error`       | Malformed/unexpected first frame.    |
 
 ## Room semantics
@@ -290,6 +296,42 @@ For stronger security the code can be shared out-of-band on a second channel.
 - Room creation and redemption are **rate-limited per source IP**
   (`RATE_LIMIT_CREATE_PER_MIN`, `RATE_LIMIT_REDEEM_PER_MIN`), bounding online
   guessing of the weak code.
+
+## Encrypted file transfer
+
+Files/images go through the **same E2E path as messages** — XChaCha20-Poly1305
+under the room key — chunked over the WebSocket. The server relays only opaque
+ciphertext and never sees the bytes, filename, or MIME type.
+
+- **`file_start`** `{ transfer, keyId, data }` — `transfer` is a random
+  correlation id; `keyId` is the non-secret key-epoch tag (see below); `data` is
+  the **encrypted metadata** `sealBytes(roomKey, JSON{name, type, size, chunks})`.
+  **Filename and MIME are inside the ciphertext** — never in cleartext fields.
+- **`file_chunk`** `{ transfer, index, data }` — `data` is one independently
+  sealed chunk: `sealBytes(roomKey, plaintextChunk)` (64 KiB plaintext/chunk).
+  Each chunk has its own nonce + Poly1305 tag, so each is independently
+  authenticated. `index` is 0-based.
+- **`file_end`** `{ transfer }` — sender done; recipients assemble once all
+  chunks arrive. **`file_abort`** `{ transfer }` — discard the partial.
+
+**Key-epoch tagging (rotation-safe).** `keyId = HKDF(roomKey, "anonchat-keyid")[:8]`
+(base64url) — a one-way tag both peers derive from the same key. The sender
+captures the room key **once** at `file_start` and uses it for the whole file;
+the recipient looks up the held key whose `keyId` matches. So a file sent just
+before a rotation still decrypts afterward, as long as the recipient still holds
+that key epoch (clients keep the last few keys). The tag leaks nothing about the
+key.
+
+**Server guards (RAM-only, never disk).** The relay forwards chunks one at a
+time and **never buffers a file to disk** (no temp files). It enforces:
+- `MAX_FILE_BYTES` — per-transfer cumulative ciphertext cap; an over-cap transfer
+  is **rejected** (`error` `file_rejected` to the sender, `file_abort` to peers).
+- `MAX_INFLIGHT_BYTES` — cap on total ciphertext of all concurrent transfers;
+  chunks beyond it are rejected. Counters are released on `file_end`, abort, or
+  sender disconnect.
+
+The client also caps the **plaintext** size before sending and revokes all blob
+object URLs on teardown / between rooms.
 
 ## Teardown / zeroing
 

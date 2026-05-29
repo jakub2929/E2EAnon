@@ -31,16 +31,22 @@ type Client struct {
 
 	// done is closed when the client's write pump exits.
 	done chan struct{}
+
+	// FileTransfers tracks cumulative ciphertext bytes per in-progress file
+	// transfer this client is SENDING (per-file cap accounting). Accessed only
+	// by this connection's single read-loop goroutine, so it needs no lock.
+	FileTransfers map[string]int64
 }
 
 // NewClient builds a client for an accepted connection.
 func NewClient(id, nick string, conn *websocket.Conn) *Client {
 	return &Client{
-		id:   id,
-		nick: nick,
-		conn: conn,
-		out:  make(chan wsproto.ServerMsg, outboundBuffer),
-		done: make(chan struct{}),
+		id:            id,
+		nick:          nick,
+		conn:          conn,
+		out:           make(chan wsproto.ServerMsg, outboundBuffer),
+		done:          make(chan struct{}),
+		FileTransfers: make(map[string]int64),
 	}
 }
 

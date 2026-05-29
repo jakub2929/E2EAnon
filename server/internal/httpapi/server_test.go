@@ -20,10 +20,12 @@ import (
 
 func testConfig() config.Config {
 	return config.Config{
-		Port:           "0",
-		MaxRoomSize:    10,
-		AllowedOrigins: []string{"*"},
-		InviteCodeTTL:  5 * time.Minute,
+		Port:             "0",
+		MaxRoomSize:      10,
+		AllowedOrigins:   []string{"*"},
+		InviteCodeTTL:    5 * time.Minute,
+		MaxFileBytes:     16 << 20,
+		MaxInflightBytes: 64 << 20,
 		// Rate limits left at 0 = disabled, except where a test sets them.
 	}
 }
@@ -608,6 +610,88 @@ func TestOwnerLeaveFreesAllSessions(t *testing.T) {
 			t.Fatalf("session %q not freed after owner left", sid)
 		}
 	}
+}
+
+// ── file transfer relay + caps ──────────────────────────────────────────────
+
+func TestFileRelayForwardsOpaqueFrames(t *testing.T) {
+	url := newServer(t, testConfig())
+	owner, _ := createRoom(t, url, "alice")
+	bob, _ := joinViaInvite(t, url, owner, "bob")
+
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeFileStart, Transfer: "t1", KeyID: "kid", Data: "ENCMETA"})
+	if m := recvType(t, bob, wsproto.TypeFileStart); m.Transfer != "t1" || m.Data != "ENCMETA" || m.KeyID != "kid" {
+		t.Fatalf("file_start altered: %+v", m)
+	}
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeFileChunk, Transfer: "t1", Index: 3, Data: "OPAQUECHUNK=="})
+	if m := recvType(t, bob, wsproto.TypeFileChunk); m.Data != "OPAQUECHUNK==" || m.Index != 3 {
+		t.Fatalf("file_chunk altered: %+v", m)
+	}
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeFileEnd, Transfer: "t1"})
+	if m := recvType(t, bob, wsproto.TypeFileEnd); m.Transfer != "t1" {
+		t.Fatalf("file_end altered: %+v", m)
+	}
+}
+
+func TestFileTooLargeRejected(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxFileBytes = 50 // tiny cap
+	url := newServer(t, cfg)
+	owner, _ := createRoom(t, url, "alice")
+	bob, _ := joinViaInvite(t, url, owner, "bob")
+
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeFileStart, Transfer: "big", KeyID: "k", Data: "m"})
+	recvType(t, bob, wsproto.TypeFileStart)
+
+	// One chunk over the cap -> sender gets file_rejected, recipient gets abort.
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeFileChunk, Transfer: "big", Index: 0, Data: strings.Repeat("x", 100)})
+	if e := recvType(t, owner, wsproto.TypeError); e.Reason != wsproto.ReasonFileRejected {
+		t.Fatalf("expected file_rejected, got %q", e.Reason)
+	}
+	if a := recvType(t, bob, wsproto.TypeFileAbort); a.Transfer != "big" {
+		t.Fatalf("expected file_abort for 'big', got %+v", a)
+	}
+}
+
+func waitInflightZero(t *testing.T, hub *relay.Hub) {
+	t.Helper()
+	for i := 0; i < 40; i++ {
+		if hub.InflightBytes() == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("in-flight bytes did not return to 0: %d", hub.InflightBytes())
+}
+
+func TestFileInflightReleasedOnEnd(t *testing.T) {
+	url, hub := newServerH(t, testConfig())
+	owner, _ := createRoom(t, url, "alice")
+	bob, _ := joinViaInvite(t, url, owner, "bob")
+
+	send(t, bob, wsproto.ClientMsg{Type: wsproto.TypeFileStart, Transfer: "t", KeyID: "k", Data: "m"})
+	recvType(t, owner, wsproto.TypeFileStart)
+	send(t, bob, wsproto.ClientMsg{Type: wsproto.TypeFileChunk, Transfer: "t", Index: 0, Data: "0123456789"})
+	recvType(t, owner, wsproto.TypeFileChunk)
+	send(t, bob, wsproto.ClientMsg{Type: wsproto.TypeFileEnd, Transfer: "t"})
+	recvType(t, owner, wsproto.TypeFileEnd)
+
+	waitInflightZero(t, hub) // released on file_end
+}
+
+func TestFileInflightReleasedOnDisconnect(t *testing.T) {
+	url, hub := newServerH(t, testConfig())
+	owner, _ := createRoom(t, url, "alice")
+	bob, _ := joinViaInvite(t, url, owner, "bob")
+
+	send(t, bob, wsproto.ClientMsg{Type: wsproto.TypeFileStart, Transfer: "t", KeyID: "k", Data: "m"})
+	recvType(t, owner, wsproto.TypeFileStart)
+	send(t, bob, wsproto.ClientMsg{Type: wsproto.TypeFileChunk, Transfer: "t", Index: 0, Data: "0123456789"})
+	recvType(t, owner, wsproto.TypeFileChunk)
+
+	// Sender vanishes mid-transfer (no file_end) — its in-flight bytes must free.
+	_ = bob.Close(websocket.StatusNormalClosure, "bye")
+	waitInflightZero(t, hub)
 }
 
 func TestBadHelloRejected(t *testing.T) {

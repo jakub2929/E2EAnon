@@ -46,6 +46,22 @@ const (
 	// under the room key. Fields: Data. Relayed to all other members so every
 	// client can become owner and re-key on membership changes.
 	TypeRoster = "roster"
+
+	// File transfer (chunked, E2E). All payloads are opaque ciphertext; the
+	// server never sees the file bytes, filename, or MIME type (metadata is
+	// encrypted inside the file_start payload).
+	//
+	// TypeFileStart begins a transfer. Fields: Transfer (random id), KeyID
+	// (non-secret key-epoch tag), Data (encrypted metadata: name/mime/size/chunks).
+	TypeFileStart = "file_start"
+	// TypeFileChunk carries one independently-AEAD-sealed chunk. Fields:
+	// Transfer, Index, Data.
+	TypeFileChunk = "file_chunk"
+	// TypeFileEnd marks a transfer complete. Fields: Transfer.
+	TypeFileEnd = "file_end"
+	// TypeFileAbort tells peers to discard a transfer (server-initiated on cap
+	// breach, or sender-initiated). Fields: Transfer.
+	TypeFileAbort = "file_abort"
 )
 
 // Server -> Client message types.
@@ -82,17 +98,18 @@ const (
 
 // Reasons for room closure / errors.
 const (
-	ReasonOwnerLeft   = "owner_left"
-	ReasonRoomFull    = "room_full"
-	ReasonRoomMissing = "room_not_found"
-	ReasonBadRequest  = "bad_request"
-	ReasonServerStop  = "server_shutdown"
-	ReasonIdle        = "idle_timeout"
-	ReasonBadInvite   = "invalid_invite"
-	ReasonRateLimited = "rate_limited"
-	ReasonNotOwner    = "not_owner"
-	ReasonKicked      = "kicked"
-	ReasonInRoom      = "already_in_room"
+	ReasonOwnerLeft    = "owner_left"
+	ReasonRoomFull     = "room_full"
+	ReasonRoomMissing  = "room_not_found"
+	ReasonBadRequest   = "bad_request"
+	ReasonServerStop   = "server_shutdown"
+	ReasonIdle         = "idle_timeout"
+	ReasonBadInvite    = "invalid_invite"
+	ReasonRateLimited  = "rate_limited"
+	ReasonNotOwner     = "not_owner"
+	ReasonKicked       = "kicked"
+	ReasonInRoom       = "already_in_room"
+	ReasonFileRejected = "file_rejected"
 )
 
 // ClientMsg is a message received from a client. A single envelope keeps the
@@ -104,8 +121,11 @@ type ClientMsg struct {
 	Body      string `json:"body,omitempty"`
 	Token     string `json:"token,omitempty"`     // redeem
 	Handshake string `json:"handshake,omitempty"` // pake / key_deliver / member_key / enter
-	Data      string `json:"data,omitempty"`      // opaque handshake / rekey payload
+	Data      string `json:"data,omitempty"`      // opaque handshake / rekey / file payload
 	Target    string `json:"target,omitempty"`    // rekey: destination member id
+	Transfer  string `json:"transfer,omitempty"`  // file transfer id
+	KeyID     string `json:"keyId,omitempty"`     // file: key-epoch tag (non-secret)
+	Index     int    `json:"index"`               // file: chunk index (0-based; never omitted)
 	// Session is the client's ephemeral per-tab id (random, in-memory only),
 	// sent on create/redeem. The server uses it ONLY to enforce one room per
 	// session (RAM map). It is not secret and is never persisted. Empty disables
@@ -135,5 +155,8 @@ type ServerMsg struct {
 	Error     string       `json:"error,omitempty"`
 	Token     string       `json:"token,omitempty"`     // invite_created
 	Handshake string       `json:"handshake,omitempty"` // handshake-related
-	Data      string       `json:"data,omitempty"`      // pake / key_deliver payload
+	Data      string       `json:"data,omitempty"`      // pake / key_deliver / file payload
+	Transfer  string       `json:"transfer,omitempty"`  // file transfer id
+	KeyID     string       `json:"keyId,omitempty"`     // file: key-epoch tag
+	Index     int          `json:"index"`               // file: chunk index (0-based; never omitted)
 }

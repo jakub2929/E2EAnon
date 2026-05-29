@@ -24,6 +24,13 @@ type Config struct {
 	// WSPingInterval is how often the server pings each WebSocket to keep it
 	// alive through proxies/NAT and to detect dead connections. Zero disables.
 	WSPingInterval time.Duration
+	// MaxFileBytes caps a single file transfer's total CIPHERTEXT bytes. A
+	// transfer exceeding it is rejected (never buffered to disk). Should exceed
+	// the client's plaintext cap by ~1.4x to cover base64 + AEAD overhead.
+	MaxFileBytes int64
+	// MaxInflightBytes caps the total ciphertext bytes of all concurrent file
+	// transfers the relay will carry; further chunks are rejected over it.
+	MaxInflightBytes int64
 	// AllowedOrigins is the set of permitted Origin header values for the WS
 	// handshake. A single "*" entry allows any origin (development only).
 	AllowedOrigins []string
@@ -66,6 +73,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if c.WSPingInterval, err = getdur("WS_PING_INTERVAL", 25*time.Second); err != nil {
+		return Config{}, err
+	}
+	if c.MaxFileBytes, err = getint64("MAX_FILE_BYTES", 16<<20); err != nil { // ~16 MiB ciphertext
+		return Config{}, err
+	}
+	if c.MaxInflightBytes, err = getint64("MAX_INFLIGHT_BYTES", 64<<20); err != nil { // 64 MiB total
 		return Config{}, err
 	}
 	if c.InviteCodeTTL, err = getdur("INVITE_CODE_TTL", 5*time.Minute); err != nil {
@@ -116,6 +129,18 @@ func getint(key string, def int) (int, error) {
 		return def, nil
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return n, nil
+}
+
+func getint64(key string, def int64) (int64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}

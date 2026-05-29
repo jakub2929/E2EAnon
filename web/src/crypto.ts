@@ -32,14 +32,13 @@ export function wipeKey(key: RoomKey | null): void {
   if (key) key.fill(0);
 }
 
-// encryptMessage seals a UTF-8 string into a base64 envelope:
+// sealBytes seals raw bytes into a base64 envelope:
 //   base64( version(1) || nonce(24) || ciphertext+tag )
-export function encryptMessage(key: RoomKey, plaintext: string): string {
+// Used for messages (UTF-8 bytes) and for file metadata/chunks alike.
+export function sealBytes(key: RoomKey, pt: Uint8Array): string {
   const nonce = new Uint8Array(NONCE_LEN);
   crypto.getRandomValues(nonce);
-  const pt = new TextEncoder().encode(plaintext);
   const ct = xchacha20poly1305(key, nonce).encrypt(pt);
-
   const out = new Uint8Array(1 + NONCE_LEN + ct.length);
   out[0] = VERSION;
   out.set(nonce, 1);
@@ -47,16 +46,31 @@ export function encryptMessage(key: RoomKey, plaintext: string): string {
   return bytesToB64(out);
 }
 
-// decryptMessage opens an envelope produced by encryptMessage. Throws on a bad
-// version, malformed input, or authentication failure (tampered/wrong key).
-export function decryptMessage(key: RoomKey, envelope: string): string {
+// openBytes opens an envelope produced by sealBytes. Throws on bad version,
+// malformed input, or authentication failure (tampered / wrong key).
+export function openBytes(key: RoomKey, envelope: string): Uint8Array {
   const buf = b64ToBytes(envelope);
   if (buf.length < 1 + NONCE_LEN + TAG_LEN) throw new Error("ciphertext too short");
   if (buf[0] !== VERSION) throw new Error(`unsupported envelope version ${buf[0]}`);
   const nonce = buf.subarray(1, 1 + NONCE_LEN);
   const ct = buf.subarray(1 + NONCE_LEN);
-  const pt = xchacha20poly1305(key, nonce).decrypt(ct); // throws on auth failure
-  return new TextDecoder().decode(pt);
+  return xchacha20poly1305(key, nonce).decrypt(ct); // throws on auth failure
+}
+
+export function encryptMessage(key: RoomKey, plaintext: string): string {
+  return sealBytes(key, new TextEncoder().encode(plaintext));
+}
+
+export function decryptMessage(key: RoomKey, envelope: string): string {
+  return new TextDecoder().decode(openBytes(key, envelope));
+}
+
+// keyId is a short, NON-SECRET tag identifying a room key (its "epoch"). Both
+// peers derive the same id from the same key via HKDF; a file carries it so a
+// recipient can pick the matching key it still holds — even after rotation. It
+// is a one-way hash and leaks nothing about the key.
+export function keyId(key: RoomKey): string {
+  return bytesToB64url(hkdf(sha256, key, EMPTY, KEYID_INFO, 8));
 }
 
 // ── X25519 per-member keys + key distribution (Phase 5) ─────────────────────
@@ -81,6 +95,7 @@ export function generateKeyPair(): KeyPair {
 const EMPTY = new Uint8Array(0);
 const KEYX_INFO = new TextEncoder().encode("anonchat-keyx-v1");
 const REKEY_INFO = new TextEncoder().encode("anonchat-rekey-v1");
+const KEYID_INFO = new TextEncoder().encode("anonchat-keyid-v1");
 
 // sealUnderKe / openUnderKe protect a public key in transit under the SPAKE2
 // secret Ke (16 bytes), expanded via HKDF. Prevents a malicious relay from

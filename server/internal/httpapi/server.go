@@ -115,6 +115,10 @@ func (s *Server) session(ctx context.Context, conn *websocket.Conn, ip string) {
 	defer func() {
 		s.hub.EndHandshakesFor(client)
 		s.hub.ClearSession(sessionID, client)
+		// Release any in-flight file bytes this connection still held.
+		for _, b := range client.FileTransfers {
+			s.hub.AddInflight(-b)
+		}
 	}()
 
 	switch hello.Type {
@@ -289,11 +293,73 @@ func (s *Server) memberLoop(ctx context.Context, conn *websocket.Conn, client *r
 			if s.isOwner(client, room) {
 				room.BroadcastExcept(client.ID(), wsproto.ServerMsg{Type: wsproto.TypeRoster, Data: m.Data})
 			}
+		case wsproto.TypeFileStart, wsproto.TypeFileChunk, wsproto.TypeFileEnd, wsproto.TypeFileAbort:
+			s.handleFile(client, room, m)
 		case wsproto.TypeLeave:
 			return ""
 		default:
 			// Ignore unknown frames.
 		}
+	}
+}
+
+// handleFile relays opaque file-transfer frames to the other members while
+// enforcing the per-file and total in-flight ciphertext-byte caps. Chunks are
+// relayed one at a time and NEVER buffered to disk; an over-cap transfer is
+// rejected (file_abort) rather than stored.
+func (s *Server) handleFile(client *relay.Client, room *relay.Room, m wsproto.ClientMsg) {
+	if m.Transfer == "" {
+		return
+	}
+	switch m.Type {
+	case wsproto.TypeFileStart:
+		client.FileTransfers[m.Transfer] = 0
+		room.BroadcastExcept(client.ID(), wsproto.ServerMsg{
+			Type: wsproto.TypeFileStart, Transfer: m.Transfer, KeyID: m.KeyID,
+			Data: m.Data, From: client.ID(), Nick: client.Nick(),
+		})
+	case wsproto.TypeFileChunk:
+		cur, ok := client.FileTransfers[m.Transfer]
+		if !ok {
+			return // unknown or already-aborted transfer
+		}
+		size := int64(len(m.Data))
+		if cur+size > s.hub.MaxFileBytes() {
+			s.abortFile(client, room, m.Transfer, "file too large")
+			return
+		}
+		if s.hub.AddInflight(size) > s.hub.MaxInflightBytes() {
+			s.hub.AddInflight(-size)
+			s.abortFile(client, room, m.Transfer, "server busy, too many transfers")
+			return
+		}
+		client.FileTransfers[m.Transfer] = cur + size
+		room.BroadcastExcept(client.ID(), wsproto.ServerMsg{
+			Type: wsproto.TypeFileChunk, Transfer: m.Transfer, Index: m.Index,
+			Data: m.Data, From: client.ID(),
+		})
+	case wsproto.TypeFileEnd:
+		s.finishFile(client, m.Transfer)
+		room.BroadcastExcept(client.ID(), wsproto.ServerMsg{Type: wsproto.TypeFileEnd, Transfer: m.Transfer, From: client.ID()})
+	case wsproto.TypeFileAbort:
+		s.finishFile(client, m.Transfer)
+		room.BroadcastExcept(client.ID(), wsproto.ServerMsg{Type: wsproto.TypeFileAbort, Transfer: m.Transfer, From: client.ID()})
+	}
+}
+
+// abortFile rejects a transfer: releases its counted bytes, tells the sender,
+// and tells recipients to discard the partial.
+func (s *Server) abortFile(client *relay.Client, room *relay.Room, transfer, reason string) {
+	s.finishFile(client, transfer)
+	client.Send(wsproto.ServerMsg{Type: wsproto.TypeError, Error: reason, Reason: wsproto.ReasonFileRejected, Transfer: transfer})
+	room.BroadcastExcept(client.ID(), wsproto.ServerMsg{Type: wsproto.TypeFileAbort, Transfer: transfer, From: client.ID()})
+}
+
+// finishFile releases a transfer's counted in-flight bytes.
+func (s *Server) finishFile(client *relay.Client, transfer string) {
+	if bytes, ok := client.FileTransfers[transfer]; ok {
+		s.hub.AddInflight(-bytes)
+		delete(client.FileTransfers, transfer)
 	}
 }
 

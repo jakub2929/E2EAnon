@@ -18,8 +18,11 @@ import {
   encryptMessage,
   generateKeyPair,
   generateRoomKey,
+  keyId,
+  openBytes,
   openRoomKey,
   openUnderKe,
+  sealBytes,
   sealRoomKey,
   sealUnderKe,
 } from "./crypto";
@@ -55,6 +58,9 @@ class Client {
   closedReason: string | null = null;
   lastError: string | null = null;
   isIn = false;
+  sentRaw: string[] = []; // every outgoing frame (to assert no plaintext on wire)
+  filesReceived: { name: string; type: string; bytes: Uint8Array }[] = [];
+  private incoming = new Map<string, { key: RoomKey; meta: any; parts: (Uint8Array | undefined)[]; received: number }>();
   entered: Promise<void>;
   private enteredResolve!: () => void;
   private inviteResolvers: ((v: { token: string; code: string }) => void)[] = [];
@@ -72,7 +78,30 @@ class Client {
     });
   }
   private send(m: unknown) {
-    this.ws.send(JSON.stringify(m));
+    const raw = JSON.stringify(m);
+    this.sentRaw.push(raw);
+    this.ws.send(raw);
+  }
+
+  // sendFile mirrors the browser client: capture the current key epoch, encrypt
+  // metadata + chunks, stream them.
+  async sendFile(name: string, type: string, bytes: Uint8Array) {
+    const key = this.keys[0];
+    const kid = keyId(key);
+    const transfer = "xfer-" + Math.abs(bytes.length) + "-" + name.length;
+    const CHUNK = 64 * 1024;
+    const total = Math.max(1, Math.ceil(bytes.length / CHUNK));
+    const meta = { name, type, size: bytes.length, chunks: total };
+    this.send({ type: "file_start", transfer, keyId: kid, data: encryptMessage(key, JSON.stringify(meta)) });
+    for (let i = 0; i < total; i++) {
+      this.send({ type: "file_chunk", transfer, index: i, data: sealBytes(key, bytes.subarray(i * CHUNK, (i + 1) * CHUNK)) });
+    }
+    this.send({ type: "file_end", transfer });
+  }
+
+  private findKeyById(id: string): RoomKey | null {
+    for (const k of this.keys) if (keyId(k) === id) return k;
+    return null;
   }
   async create(nick: string) {
     await this.open();
@@ -154,6 +183,30 @@ class Client {
         break;
       case "roster":
         this.applyRoster(m.data);
+        break;
+      case "file_start": {
+        const key = this.findKeyById(m.keyId);
+        if (!key) break;
+        const meta = JSON.parse(decryptMessage(key, m.data));
+        this.incoming.set(m.transfer, { key, meta, parts: new Array(meta.chunks), received: 0 });
+        break;
+      }
+      case "file_chunk": {
+        const inc = this.incoming.get(m.transfer);
+        if (!inc || inc.parts[m.index]) break;
+        inc.parts[m.index] = openBytes(inc.key, m.data);
+        if (++inc.received === inc.meta.chunks) {
+          const total = inc.parts.reduce((n, p) => n + (p?.length ?? 0), 0);
+          const bytes = new Uint8Array(total);
+          let off = 0;
+          for (const p of inc.parts) { bytes.set(p!, off); off += p!.length; }
+          this.filesReceived.push({ name: inc.meta.name, type: inc.meta.type, bytes });
+          this.incoming.delete(m.transfer);
+        }
+        break;
+      }
+      case "file_end":
+        this.incoming.delete(m.transfer);
         break;
       case "room_closed":
         this.closedReason = m.reason ?? "closed";
@@ -427,6 +480,41 @@ describe.skipIf(!haveGo)("full-stack Phase 6: rotation, transfer, kick", () => {
     expect(freed).toBe(true);
     alice.close();
   }, 15_000);
+
+  it("sends an encrypted file E2E (metadata + bytes); server sees only ciphertext", async () => {
+    const alice = new Client();
+    await alice.create("alice");
+    await alice.entered;
+    const bob = await addMember(alice, "bob");
+
+    // ~180 KB (multi-chunk) with a recognizable plaintext marker embedded.
+    const MARKER = "FILE_PLAINTEXT_MARKER_9000";
+    const bytes = new Uint8Array(180 * 1024);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+    new TextEncoder().encodeInto(MARKER, bytes); // marker at the start
+    const NAME = "marker-secret.bin";
+
+    await alice.sendFile(NAME, "application/octet-stream", bytes);
+    await sleep(500);
+
+    // Bob reconstructs the exact file + its (encrypted) metadata.
+    expect(bob.filesReceived.length).toBe(1);
+    const f = bob.filesReceived[0];
+    expect(f.name).toBe(NAME);
+    expect(f.type).toBe("application/octet-stream");
+    expect(f.bytes.length).toBe(bytes.length);
+    expect(Array.from(f.bytes.slice(0, 64))).toEqual(Array.from(bytes.slice(0, 64)));
+    expect(Array.from(f.bytes.slice(-64))).toEqual(Array.from(bytes.slice(-64)));
+
+    // Nothing alice sent over the wire contains the filename or the marker.
+    const wire = alice.sentRaw.join("\n");
+    expect(wire.includes(MARKER)).toBe(false);
+    expect(wire.includes(NAME)).toBe(false);
+    expect(wire.includes("application/octet-stream")).toBe(false);
+
+    alice.close();
+    bob.close();
+  }, 20_000);
 
   it("kick removes a member and the kicked client is told", async () => {
     const alice = new Client();
