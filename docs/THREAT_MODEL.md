@@ -170,6 +170,21 @@ tab during that tab's lifetime* — but this is **no more linkable than the IP +
 timing the server already observes**, the id is never persisted, and a reload
 generates a new one. Net effect on anonymity: negligible.
 
+### K. Public aggregate stats (`GET /api/stats`)
+The lobby shows two **global aggregate integers** — live connection count and
+active room count — served unauthenticated from `/api/stats`. Be aware:
+
+- **Anyone** (not just lobby users) can poll it and build their own coarse
+  **time series of overall server activity** — the server keeps no history, but
+  an external observer can record one.
+- **`online: 1` reveals that a single user is connected** (a small
+  anonymity-set moment); `0` means the server is empty.
+
+It is **aggregate only** — no identities, no IPs, no room IDs, no room list, no
+per-room or per-user counts, and nothing persisted. This is a conscious UX
+tradeoff. If even the aggregate signal is unwanted for your deployment, remove
+the `/api/stats` route and the lobby line; nothing else depends on them.
+
 ## Trust assumptions
 
 - The client code you run is the unmodified, intended AnonChat build (see §A).

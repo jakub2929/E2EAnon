@@ -27,6 +27,10 @@ never read message content or derive any encryption key.
   XChaCha20-Poly1305; filename/MIME encrypted in the payload; server relays
   opaque blobs, never touches disk).
 - On leave / room close, all message history is wiped from memory everywhere.
+- **Live lobby stats** — a small aggregate line (`N people online · M active
+  rooms`) from a RAM-only `GET /api/stats`. Global integers only — no identities,
+  no per-room data, nothing persisted (see the threat model for the minor
+  metadata signal this exposes).
 - **One room per session** (soft, UX-level): a tab is in at most one room at a
   time, tracked by an ephemeral in-memory session id. Switching prompts you to
   leave first (owners are offered ownership transfer before destroying the room).
