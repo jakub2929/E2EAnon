@@ -163,4 +163,3 @@ threat model) and flag any tradeoff explicitly.
 ## License
 
 [MIT](LICENSE).
-# E2EAnon
