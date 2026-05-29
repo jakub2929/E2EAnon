@@ -1,0 +1,31 @@
+# Build artifacts
+/server/bin/
+/server/anonchat
+*.exe
+*.test
+*.out
+
+# Go
+/server/vendor/
+
+# Frontend
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# Env / secrets
+.env
+.env.local
+*.local
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local tooling (preview/launch configs with machine-specific paths)
+.claude/
+
+# Logs
+*.log

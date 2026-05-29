@@ -1,0 +1,41 @@
+# AnonChat — single-container deployment.
+# Coolify can consume this compose file directly. No volumes / no persistence.
+services:
+  anonchat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anonchat:latest
+    restart: unless-stopped
+    # The container listens on 8080. Coolify routes its Traefik proxy to this
+    # exposed port (attach a domain in the UI) — you do NOT need published host
+    # ports there. `expose` lets Coolify auto-detect the port.
+    expose:
+      - "8080"
+    # Published host port is for plain `docker compose up` on a dedicated host.
+    # On a shared Coolify host, remove this to avoid port conflicts (Traefik
+    # handles ingress).
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      MAX_ROOM_SIZE: "${MAX_ROOM_SIZE:-10}"
+      ROOM_IDLE_TIMEOUT: "${ROOM_IDLE_TIMEOUT:-30m}"
+      # Lock this down in production: set to your exact origin, e.g.
+      # https://chat.example.com (comma-separated for multiple). "*" = dev only.
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
+      # Behind Coolify/Traefik this should be true.
+      TRUST_PROXY: "${TRUST_PROXY:-true}"
+      INVITE_CODE_TTL: "${INVITE_CODE_TTL:-5m}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+    healthcheck:
+      test: ["CMD", "/anonchat", "-healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # Hardening: read-only root FS is fine — the app writes nothing to disk.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true

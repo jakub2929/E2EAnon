@@ -1,0 +1,19 @@
+# Keep the build context small and deterministic.
+.git
+.github
+**/node_modules
+web/dist
+server/bin
+server/anonchat
+**/*.test
+**/*.out
+*.log
+.env
+.env.local
+docs
+README.md
+LICENSE
+.DS_Store
+
+# Do NOT ignore server/internal/webui/dist — the placeholder must be present so
+# `go build` works before the real frontend is copied in.

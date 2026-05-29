@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>AnonChat</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <header class="topbar">
+        <h1>AnonChat</h1>
+        <span class="tag">E2E · forward-secret rotation · one room per session</span>
+      </header>
+
+      <!-- Lobby: create or join -->
+      <section id="lobby" class="card">
+        <label class="field">
+          <span>Nickname</span>
+          <input id="nick" type="text" maxlength="64" placeholder="anon" autocomplete="off" />
+        </label>
+
+        <div class="actions">
+          <button id="create-btn" type="button">Create a room</button>
+        </div>
+
+        <div class="divider"><span>or</span></div>
+
+        <form id="join-form" class="join">
+          <label class="field">
+            <span>Invite link</span>
+            <input id="room-input" type="text" placeholder="paste invite link…" autocomplete="off" required />
+          </label>
+          <button type="submit">Join</button>
+        </form>
+
+        <p id="lobby-status" class="notice" role="status"></p>
+        <p id="lobby-error" class="error" role="alert"></p>
+      </section>
+
+      <!-- Room: chat -->
+      <section id="room" class="card hidden">
+        <div class="room-head">
+          <div>
+            <span class="muted">Room</span>
+            <code id="room-id"></code>
+            <span id="e2e-badge" class="e2e" title="Messages are end-to-end encrypted in your browser">🔒 E2E encrypted</span>
+          </div>
+          <div>
+            <button id="invite-btn" type="button" class="hidden">Invite</button>
+            <button id="leave-btn" type="button" class="danger">Leave</button>
+          </div>
+        </div>
+
+        <div id="invite-box" class="invite-box hidden">
+          <span class="muted">Single-use invite link (expires soon — share privately):</span>
+          <div class="invite-row">
+            <input id="invite-link" type="text" readonly />
+            <button id="copy-invite-btn" type="button">Copy</button>
+          </div>
+        </div>
+
+        <div class="room-body">
+          <ul id="messages" aria-live="polite"></ul>
+          <aside class="presence">
+            <h2>Members (<span id="member-count">0</span>)</h2>
+            <ul id="members"></ul>
+          </aside>
+        </div>
+
+        <form id="msg-form" class="msg">
+          <input id="msg-input" type="text" placeholder="Type a message…" autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+
+        <p id="room-notice" class="notice" role="status"></p>
+      </section>
+    </main>
+
+    <!-- Generic confirm/choice modal (e.g. owner leave: transfer vs destroy) -->
+    <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <h2 id="modal-title"></h2>
+        <div id="modal-body"></div>
+        <div id="modal-actions" class="modal-actions"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
