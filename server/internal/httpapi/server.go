@@ -26,6 +26,9 @@ const (
 	readLimit = 256 << 10 // 256 KiB
 	// helloTimeout bounds how long we wait for the first create/redeem frame.
 	helloTimeout = 15 * time.Second
+	// pongTimeout bounds how long a heartbeat ping waits for the pong before the
+	// connection is considered dead.
+	pongTimeout = 10 * time.Second
 	// inviteTokenBytes is the entropy of an invite ROUTING token (independent of
 	// the SPAKE2 code; the server never sees the code).
 	inviteTokenBytes = 16 // 128-bit
@@ -33,22 +36,24 @@ const (
 
 // Server holds the HTTP handler dependencies.
 type Server struct {
-	cfg       config.Config
-	hub       *relay.Hub
-	log       *slog.Logger
-	createLim *ratelimit.Limiter
-	redeemLim *ratelimit.Limiter
+	cfg          config.Config
+	hub          *relay.Hub
+	log          *slog.Logger
+	createLim    *ratelimit.Limiter
+	redeemLim    *ratelimit.Limiter
+	pingInterval time.Duration
 }
 
 // NewServer builds the HTTP handler. staticFS provides the frontend assets
 // (embedded or from disk); nil mounts a plain-text placeholder at "/".
 func NewServer(cfg config.Config, hub *relay.Hub, log *slog.Logger, staticFS fs.FS) http.Handler {
 	s := &Server{
-		cfg:       cfg,
-		hub:       hub,
-		log:       log,
-		createLim: ratelimit.New(cfg.RateLimitCreatePerMin, time.Minute),
-		redeemLim: ratelimit.New(cfg.RateLimitRedeemPerMin, time.Minute),
+		cfg:          cfg,
+		hub:          hub,
+		log:          log,
+		createLim:    ratelimit.New(cfg.RateLimitCreatePerMin, time.Minute),
+		redeemLim:    ratelimit.New(cfg.RateLimitRedeemPerMin, time.Minute),
+		pingInterval: cfg.WSPingInterval,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -83,6 +88,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Heartbeat keeps idle-but-live connections alive through proxies/NAT and
+	// detects dead ones (browsers auto-reply to server pings with pongs).
+	go s.heartbeat(ctx, conn, cancel)
 	s.session(ctx, conn, ip)
 }
 
@@ -354,6 +362,35 @@ func (s *Server) relayHandshake(from *relay.Client, m wsproto.ClientMsg) {
 		return // sender is not a party to this handshake
 	}
 	peer.Send(wsproto.ServerMsg{Type: m.Type, Handshake: m.Handshake, Data: m.Data})
+}
+
+// heartbeat pings the peer every pingInterval; if the pong does not arrive
+// within pongTimeout the connection is treated as dead and the session is
+// cancelled (which unblocks the read loop and triggers normal teardown).
+// Browsers auto-reply to server pings with pongs at the protocol level, so an
+// idle but live tab stays connected through Coolify/Traefik and NAT. A zero
+// interval disables the heartbeat.
+func (s *Server) heartbeat(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
+	if s.pingInterval <= 0 {
+		return
+	}
+	t := time.NewTicker(s.pingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pctx, pcancel := context.WithTimeout(ctx, pongTimeout)
+			err := conn.Ping(pctx)
+			pcancel()
+			if err != nil {
+				_ = conn.Close(websocket.StatusPolicyViolation, "ping timeout")
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 // clientIP resolves the client's source IP. Behind a trusted reverse proxy

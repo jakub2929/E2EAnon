@@ -17,9 +17,13 @@ type Config struct {
 	Port string
 	// MaxRoomSize is the hard cap on members per room (spec: 10).
 	MaxRoomSize int
-	// RoomIdleTimeout is how long a room may sit idle before it is destroyed
-	// and its RAM wiped. Zero disables idle GC.
+	// RoomIdleTimeout is how long a room with NO live members may sit before it
+	// is destroyed and its RAM wiped. Rooms with connected members are kept
+	// alive regardless (silent presence counts). Zero disables idle GC.
 	RoomIdleTimeout time.Duration
+	// WSPingInterval is how often the server pings each WebSocket to keep it
+	// alive through proxies/NAT and to detect dead connections. Zero disables.
+	WSPingInterval time.Duration
 	// AllowedOrigins is the set of permitted Origin header values for the WS
 	// handshake. A single "*" entry allows any origin (development only).
 	AllowedOrigins []string
@@ -59,6 +63,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MAX_ROOM_SIZE must be >= 1, got %d", c.MaxRoomSize)
 	}
 	if c.RoomIdleTimeout, err = getdur("ROOM_IDLE_TIMEOUT", 30*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if c.WSPingInterval, err = getdur("WS_PING_INTERVAL", 25*time.Second); err != nil {
 		return Config{}, err
 	}
 	if c.InviteCodeTTL, err = getdur("INVITE_CODE_TTL", 5*time.Minute); err != nil {

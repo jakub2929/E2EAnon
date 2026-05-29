@@ -63,6 +63,13 @@ func (r *Room) HasCapacity() bool {
 	return !r.closed && len(r.members) < r.maxSize
 }
 
+// MemberCount returns the number of current members.
+func (r *Room) MemberCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.members)
+}
+
 // Add inserts a client into the room. The first member becomes the owner.
 // Returns the assigned role. Callers must send a welcome and broadcast presence
 // after a successful add.

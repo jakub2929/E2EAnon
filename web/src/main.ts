@@ -64,6 +64,9 @@ interface Session {
 }
 let session: Session | null = null;
 let pendingJoin: { token: string; code: string } | null = null;
+// True when the socket is being closed deliberately (user leave / room ended),
+// so onClose can distinguish a clean exit from an unexpected drop.
+let intentionalClose = false;
 
 // ── DOM helpers ─────────────────────────────────────────────────────────────
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -224,8 +227,9 @@ function onMessage(data: unknown): void {
       applyRoster(msg.data ?? "");
       break;
     case "room_closed":
-      roomNotice.textContent = closeReason(msg.reason);
-      teardown();
+      intentionalClose = true; // server ended the room; lobby return is expected
+      teardown(true);
+      lobbyError.textContent = closeReason(msg.reason);
       break;
     case "error":
       handleError(msg);
@@ -492,8 +496,17 @@ function handleError(msg: ServerMsg): void {
 }
 
 function onClose(): void {
-  if (session && session.room && !roomNotice.textContent) roomNotice.textContent = "Disconnected.";
-  teardown(false);
+  const wasInRoom = !!(session && session.room);
+  if (wasInRoom && !intentionalClose) {
+    // Unexpected drop (network blip, iOS tab suspend, proxy). We cannot resume
+    // the room without a server-side resume feature, so fail cleanly to the
+    // lobby with everything wiped — never a dead "stuck" room view.
+    teardown(true);
+    lobbyError.textContent = "Connection lost — the room has ended. Rejoin with a new invite.";
+  } else if (!wasInRoom) {
+    teardown(false);
+  }
+  intentionalClose = false;
 }
 
 function teardown(returnToLobby = true): void {
@@ -725,11 +738,25 @@ function onLeaveClicked(): void {
 }
 
 function doLeave(): void {
+  intentionalClose = true;
   send({ type: "leave" });
   teardown();
 }
 
 window.addEventListener("beforeunload", () => send({ type: "leave" }));
+
+// iOS Safari suspends backgrounded tabs (timers + sockets). On return, if our
+// socket died, recover cleanly to the lobby instead of appearing frozen.
+function recoverIfSocketDead(): void {
+  if (session && session.ws.readyState >= WebSocket.CLOSING) {
+    intentionalClose = false;
+    onClose();
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") recoverIfSocketDead();
+});
+window.addEventListener("pageshow", recoverIfSocketDead);
 
 (function bootstrapFromHash() {
   if (!location.hash) return;

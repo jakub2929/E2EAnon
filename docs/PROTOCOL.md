@@ -299,4 +299,15 @@ For stronger security the code can be shared out-of-band on a second channel.
   handshake `Ke` are zeroed (`fill(0)`); the message + member DOM is cleared.
   Nothing is ever written to `localStorage`/`sessionStorage`/IndexedDB/cookies.
 
-_TBD — Phase 7 (full threat model write-up)._
+## Connection liveness
+
+- The server pings each WebSocket every `WS_PING_INTERVAL` (default 25s; browsers
+  auto-reply with pongs). This keeps idle-but-live connections alive through
+  proxies/NAT (Coolify's Traefik) and detects dead ones within ~interval + 10s.
+- **Silent presence is not idleness:** a room with any connected member is kept
+  alive; idle GC (`ROOM_IDLE_TIMEOUT`) only reaps rooms with **zero** members.
+- **Ephemerality is unchanged.** A dropped/dead connection runs the full normal
+  teardown (member removed → room key rotates on leave / room destroyed if owner
+  → RAM wiped). There is **no session-resume that holds a disconnected member's
+  state**, so the heartbeat never defeats wipe-on-teardown. (A client cannot
+  silently re-attach to a room after a drop — it returns to the lobby wiped.)

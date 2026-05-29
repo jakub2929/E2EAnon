@@ -43,6 +43,41 @@ func newServerH(t *testing.T, cfg config.Config) (string, *relay.Hub) {
 	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws", hub
 }
 
+// TestHeartbeatKeepsIdleConnectionAlive verifies the server pings idle
+// connections and that a silent-but-connected client stays usable (no drop, and
+// Ping does not race/panic with concurrent writes — run with -race).
+func TestHeartbeatKeepsIdleConnectionAlive(t *testing.T) {
+	cfg := testConfig()
+	cfg.WSPingInterval = 40 * time.Millisecond // fast for the test
+	url := newServer(t, cfg)
+
+	owner, _ := createRoom(t, url, "alice")
+	joiner, _ := joinViaInvite(t, url, owner, "bob")
+
+	// Keep the joiner actively reading so coder/websocket auto-replies to pings
+	// with pongs (as a browser does), while we stay otherwise idle.
+	// Block on Read (no timeout): coder/websocket auto-replies to server pings
+	// with pongs while blocked here, so an idle live conn never returns an error
+	// until it actually drops (or the test closes it at cleanup).
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := joiner.Read(context.Background())
+		readErr <- err
+	}()
+
+	// Stay idle across several ping intervals — the connection must survive.
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case err := <-readErr:
+		t.Fatalf("idle connection was dropped during heartbeat: %v", err)
+	default:
+	}
+
+	// And it must still relay: owner -> bob (proves both conns are live).
+	send(t, owner, wsproto.ClientMsg{Type: wsproto.TypeInvite}) // owner write activity
+	recvType(t, owner, wsproto.TypeInviteCreated)
+}
+
 // TestRAMFreedOnDisconnect is the hard proof that closing a connection wipes the
 // room AND the session claim from server RAM — no leak in the sessions/rooms maps.
 func TestRAMFreedOnDisconnect(t *testing.T) {

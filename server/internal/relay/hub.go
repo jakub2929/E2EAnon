@@ -189,7 +189,10 @@ func (h *Hub) StartJanitor(ctx context.Context) {
 		case <-ticker.C:
 			now := h.now()
 			for _, r := range h.snapshotRooms() {
-				if r.idleFor(now) >= timeout {
+				// Only reap rooms with NO live members — a connected member
+				// (kept alive by the WS heartbeat) means the room is in use,
+				// even if no one has spoken. Silent presence is not idleness.
+				if r.MemberCount() == 0 && r.idleFor(now) >= timeout {
 					r.Close(wsproto.ReasonIdle)
 				}
 			}
