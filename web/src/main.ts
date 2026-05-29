@@ -51,6 +51,17 @@ interface Incoming {
   received: number;
 }
 
+// A live file message element with a progress bar, finalized into an
+// image/download once the transfer completes (or marked failed).
+interface FileMsgHandle {
+  li: HTMLLIElement;
+  status: HTMLElement;
+  label: HTMLElement;
+  fill: HTMLElement;
+  meta: FileMeta;
+  mine: boolean;
+}
+
 // Client-side per-file cap (Phase 1). The server enforces its own cap in Phase 2.
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 
@@ -86,6 +97,7 @@ interface Session {
   firstOwnerPub: Uint8Array | null; // joiner: owner pub from the handshake
   lastMembers: MemberInfo[]; // latest presence (for the owner-leave dialog)
   incoming: Map<string, Incoming>; // in-progress inbound file transfers
+  fileMsgs: Map<string, FileMsgHandle>; // transfer id -> live message element
   objectUrls: string[]; // blob URLs for rendered files; revoked on teardown
 }
 let session: Session | null = null;
@@ -209,6 +221,7 @@ async function connect(hello: ClientMsg): Promise<void> {
     firstOwnerPub: null,
     lastMembers: [],
     incoming: new Map(),
+    fileMsgs: new Map(),
     objectUrls: [],
   };
 }
@@ -270,7 +283,10 @@ function onMessage(data: unknown): void {
       onFileEnd(msg);
       break;
     case "file_abort":
-      if (msg.transfer) session?.incoming.delete(msg.transfer);
+      if (msg.transfer) {
+        session?.incoming.delete(msg.transfer);
+        failFileMessage(msg.transfer, "transfer aborted");
+      }
       break;
     case "room_closed":
       intentionalClose = true; // server ended the room; lobby return is expected
@@ -525,7 +541,10 @@ function ownerIdOf(members: MemberInfo[]): string {
 
 function handleError(msg: ServerMsg): void {
   if (msg.reason === "file_rejected") {
-    if (msg.transfer) session?.incoming.delete(msg.transfer);
+    if (msg.transfer) {
+      session?.incoming.delete(msg.transfer);
+      failFileMessage(msg.transfer, msg.error ?? "rejected");
+    }
     roomNotice.textContent = `Attachment rejected: ${msg.error ?? "too large"}.`;
     return;
   }
@@ -682,19 +701,25 @@ async function sendFile(file: File): Promise<void> {
   const total = Math.max(1, Math.ceil(buf.length / CHUNK_SIZE));
   const meta: FileMeta = { name: file.name, type: file.type, size: buf.length, chunks: total };
 
+  const h = startFileMessage(transfer, "you", meta, true);
+
   // Metadata (name/MIME/size) is ENCRYPTED in the payload — the server never
   // sees the filename or type.
   send({ type: "file_start", transfer, keyId: kid, data: encryptMessage(key, JSON.stringify(meta)) });
   for (let i = 0; i < total; i++) {
     const slice = buf.subarray(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
     send({ type: "file_chunk", transfer, index: i, data: sealBytes(key, slice) });
-    await Promise.resolve(); // yield to the event loop (progress UI lands in Phase 3)
+    setFileProgress(h, (i + 1) / total);
+    // Yield to the event loop (macrotask) so the browser paints the bar between
+    // chunks; also keeps a large upload from blocking the UI thread.
+    await new Promise((r) => setTimeout(r, 0));
+    if (!session) return; // left the room mid-upload
   }
   send({ type: "file_end", transfer });
 
-  // Render our own copy locally.
+  // Finalize our own copy locally.
   const url = trackUrl(URL.createObjectURL(new Blob([buf], { type: file.type })));
-  addFileMessage("you", url, meta, true);
+  finishFileMessage(transfer, url);
 }
 
 function onFileStart(msg: ServerMsg): void {
@@ -715,6 +740,7 @@ function onFileStart(msg: ServerMsg): void {
     parts: new Array(meta.chunks),
     received: 0,
   });
+  startFileMessage(msg.transfer, msg.nick ?? "?", meta, false);
 }
 
 function onFileChunk(msg: ServerMsg): void {
@@ -730,14 +756,17 @@ function onFileChunk(msg: ServerMsg): void {
   }
   inc.parts[i] = chunk;
   inc.received++;
+  const h = session!.fileMsgs.get(msg.transfer!);
+  if (h) setFileProgress(h, inc.received / inc.meta.chunks);
   if (inc.received === inc.meta.chunks) finishIncoming(msg.transfer!);
 }
 
 function onFileEnd(msg: ServerMsg): void {
   // Completion is detected when all chunks arrive; if file_end arrives with a
-  // gap, the transfer is incomplete (lost chunk) — discard it.
+  // gap, the transfer is incomplete (lost chunk) — fail it.
   if (msg.transfer && session?.incoming.has(msg.transfer)) {
     session.incoming.delete(msg.transfer);
+    failFileMessage(msg.transfer, "transfer interrupted");
   }
 }
 
@@ -747,34 +776,76 @@ function finishIncoming(transfer: string): void {
   session.incoming.delete(transfer);
   const blob = new Blob(inc.parts as unknown as BlobPart[], { type: inc.meta.type });
   const url = trackUrl(URL.createObjectURL(blob));
-  addFileMessage(inc.nick, url, inc.meta, false);
+  finishFileMessage(transfer, url);
 }
 
-function addFileMessage(nick: string, url: string, meta: FileMeta, mine: boolean): void {
+// ── File message UI (progress → image/download) ─────────────────────────────
+
+function startFileMessage(transfer: string, nick: string, meta: FileMeta, mine: boolean): FileMsgHandle {
   const li = document.createElement("li");
   li.className = mine ? "msg-mine" : "msg-other";
   const who = document.createElement("span");
   who.className = "who";
   who.textContent = nick;
-  li.appendChild(who);
 
-  if ((meta.type || "").startsWith("image/")) {
+  const status = document.createElement("div");
+  status.className = "file-status";
+  const label = document.createElement("span");
+  label.className = "file-label";
+  const bar = document.createElement("div");
+  bar.className = "file-bar";
+  const fill = document.createElement("i");
+  bar.appendChild(fill);
+  status.append(label, bar);
+
+  li.append(who, status);
+  messageList.appendChild(li);
+  messageList.scrollTop = messageList.scrollHeight;
+
+  const h: FileMsgHandle = { li, status, label, fill, meta, mine };
+  setFileProgress(h, 0);
+  session?.fileMsgs.set(transfer, h);
+  return h;
+}
+
+function setFileProgress(h: FileMsgHandle, frac: number): void {
+  const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+  h.fill.style.width = pct + "%";
+  h.label.textContent = `📎 ${h.meta.name} · ${formatBytes(h.meta.size)} — ${h.mine ? "uploading" : "receiving"} ${pct}%`;
+}
+
+function finishFileMessage(transfer: string, url: string): void {
+  const h = session?.fileMsgs.get(transfer);
+  if (!h) return;
+  session!.fileMsgs.delete(transfer);
+  h.status.remove();
+  if ((h.meta.type || "").startsWith("image/")) {
     const img = document.createElement("img");
     img.className = "msg-image";
     img.src = url;
-    img.alt = meta.name;
+    img.alt = h.meta.name;
     img.addEventListener("click", () => window.open(url, "_blank", "noopener"));
-    li.appendChild(img);
+    h.li.appendChild(img);
   } else {
     const a = document.createElement("a");
     a.className = "msg-file";
     a.href = url;
-    a.download = meta.name;
-    a.textContent = `📎 ${meta.name} (${formatBytes(meta.size)})`;
-    li.appendChild(a);
+    a.download = h.meta.name;
+    a.textContent = `📎 ${h.meta.name} (${formatBytes(h.meta.size)})`;
+    h.li.appendChild(a);
   }
-  messageList.appendChild(li);
   messageList.scrollTop = messageList.scrollHeight;
+}
+
+function failFileMessage(transfer: string, reason: string): void {
+  const h = session?.fileMsgs.get(transfer);
+  if (!h) return;
+  session!.fileMsgs.delete(transfer);
+  h.status.remove();
+  const err = document.createElement("span");
+  err.className = "file-failed";
+  err.textContent = `📎 ${h.meta.name} — ${reason}`;
+  h.li.appendChild(err);
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
